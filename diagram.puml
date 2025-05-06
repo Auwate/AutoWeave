@@ -1,0 +1,359 @@
+@startuml AutoWeave
+
+class User {
+
+    /' HTTP-Only, safe, same-site '/
+    - accessToken: Cookie
+    - refreshToken: Cookie
+
+    /' Provided data '/
+    - email: String
+    - phoneNumber: String
+    - username: String
+    - password: String
+
+}
+
+note left of User::refreshToken
+    A long lasting token, used to refresh the short lived accessToken.
+end note
+
+class Frontend {
+
+    - framework: React_Next
+    - instanceType: VercelManaged
+
+    /' Backend CRUD '/
+    + createWorkflow(accessToken: Cookie): boolean
+    + deleteWorkflow(accessToken: Cookie): boolean
+    + modifyWorkflow(accessToken: Cookie): boolean
+    + listWorkflows(accessToken: Cookie): boolean
+
+    /' Auth functionality '/
+    + signIn(): Cookie
+    + signOut(): Cookie
+    + resetPassword(): Email
+    + reset2FA(): Email
+
+}
+
+note left of Frontend::createWorkflow
+    Returns true if APIGateway received the message. Not if the message was processed.
+end note
+
+note left of Frontend::resetPassword
+    Sends message to email, needing to use 2FA to confirm.
+end note
+
+note left of Frontend::reset2FA
+    Sends message to email, needing to specify what the previous number used was.
+end note
+
+class ReverseProxy {
+
+    - framework: NGINX
+    - https: LetsEncrypt
+    - instanceType: AMD
+
+    /' Behaviors '/
+    + httpsHandshakeTermination(): HTTPS
+    + loadBalanceToAPIGateways(): HTTP
+
+}
+
+note left of ReverseProxy::httpsHandshakeTermination
+    Holds the domain name and terminates HTTPS traffic, converting to HTTP.
+end note
+
+class APIGateway {
+
+    - framework: SpringCloud
+    - instanceType: AMD
+
+    /' Behaviors '/
+    + logging(): null
+    + rateLimiting(): HTTP
+    + retries(): HTTP
+    + urlBasedResolution(): HTTP
+    + loadBalancedDiscovery(): HTTP
+
+}
+
+note left of APIGateway::instanceType
+    Uses a standard instance instead of a preemptible
+end note
+
+note left of APIGateway::framework
+    Uses Spring Cloud and Eureka for tightly coupled network requests, load balancing across preemptibles
+end note
+
+class ServiceDiscovery {
+
+    - framework: Eureka
+    - instanceType: ARM
+
+    /' Behaviors '/
+    + authLoadBalance(): HTTP
+    + authServiceConnect(): HTTP
+    + authServiceHeartBeat(): HTTP
+    + workflowControllerLoadBalance(): HTTP
+    + workflowControllerConnect(): HTTP
+    + workflowControllerHeartBeat(): HTTP
+
+}
+
+note left of ServiceDiscovery::framework
+    Standalone service that allows service discovery for clusters where network requests are synchronous
+end note
+
+class Auth {
+
+    - framework: SpringSecurity
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + logging(): null
+    + userPassLogin(): Cookie
+    + userPass2FALogin(): Cookie
+    + signUp(): null
+    + signOut(): null
+    + refreshAccessToken(): Cookie
+    + connectToServiceDiscovery(): TCP
+    + connectToAuthDB(): TCP
+
+}
+
+class WorkflowController {
+    
+    - framework: SpringWeb
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + logging(): null
+    + sendCreateWorkflowToRabbitMQ(): HTTP
+    + sendDeleteorkflowToRabbitMQ(): HTTP
+    + sendUpdateWorkflowToRabbitMQ(): HTTP
+    + sendDeleteWorkflowToRabbitMQ(): HTTP
+    + connectToServiceDiscovery(): TCP
+    + connectToWorkflowDB(): TCP
+
+}
+
+note bottom of WorkflowController
+    Controls creating and monitoring workflows.
+end note
+
+class PreemptibleCreator {
+
+    - framework: SpringWeb
+    - instanceType: AMD
+
+    /' Behaviors '/
+    + logging(): null
+    + consumeFromPrometheus(): HTTP
+    + monitorRabbitMQQueues(): TCP
+    + createPreemptible(): HTTP
+    + monitorPreemptibles(): HTTP
+    + removePreemptible(): HTTP
+
+}
+
+note right of PreemptibleCreator
+    Used for creating new capacity on overload
+end note
+
+class WorkflowDB {
+
+    - framework: Oracle_SQL_DB
+
+    /' Behaviors '/
+    + storeWorkflowsById(): HTTP
+    + listWorkflowsById(): HTTP
+    + removeWorkflowById(): HTTP
+    + updateWorkflowById(): HTTP
+
+}
+
+note left of WorkflowDB
+    Uses AuthDB IDs
+end note
+
+class AuthDB {
+
+    - framework: Oracle_SQL_DB
+
+    /' Behaviors '/
+    + storeUser(): HTTP
+    + getUser(): HTTP
+    + updateUser(): HTTP
+    + removeUser(): HTTP
+
+}
+
+note left of AuthDB
+    Returns user ID
+end note
+
+class RabbitMQ {
+
+    - instanceType: ARM
+
+    /' Behaviors '/
+    + workflowWorkerExchange(): TCP
+    + discordWorkerExchange(): TCP
+    + pollingWorkerExchange(): TCP
+    + slackWorkerExchange(): TCP
+    + emailWorkerExchange(): TCP
+
+}
+
+note left of RabbitMQ
+    Chosen instead of Kafka because of its small memory footprint.
+end note
+
+class NewEventWorker {
+
+    - framework: SpringWeb
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + getNewEventsFromRabbitMQ(): TCP
+    + createMessageOnRabbitMQ(): TCP
+    + checkInMemoryCache(): TCP
+    + emitMetrics(): HTTP
+
+}
+
+note top of NewEventWorker
+    Creates new tasks for other workers. Consumes messages from polls.
+end note
+
+class DiscordWorker {
+
+    - framework: SpringWeb
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + getTasksFromRabbitMQ(): TCP
+    + executeDiscordTask(): HTTP
+    + checkInMemoryCache(): TCP
+    + emitMetrics(): HTTP
+
+}
+
+note top of DiscordWorker
+    Executes Discord-related tasks.
+end note
+
+class PollingWorker {
+
+    - framework: SpringBatch
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + getTargetsFromRabbitMQ(): TCP
+    + batchPollTargets(): HTTP
+    + checkInMemoryCache(): TCP
+    + createMessageOnRabbitMQ(): TCP
+    + emitMetrics(): HTTP
+
+}
+
+note top of PollingWorker
+    Does batch polls on numerous targets.
+end note
+
+class SlackWorker {
+
+    - framework: SpringWeb
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + getTasksFromRabbitMQ(): TCP
+    + executeSlackTask(): HTTP
+    + checkInMemoryCache(): TCP
+    + emitMetrics(): HTTP
+
+}
+
+note top of SlackWorker
+    Executes Slack-related tasks.
+end note
+
+class EmailWorker {
+
+    - framework: SpringWeb
+    - instanceType: ARM_And_Preemptible
+
+    /' Behaviors '/
+    + getTasksFromRabbitMQ(): TCP
+    + executeEmailTask(): HTTP
+    + checkInMemoryCache(): TCP
+    + emitMetrics(): HTTP
+
+}
+
+note top of EmailWorker
+    Executes Email-related tasks.
+end note
+
+class InMemoryCache {
+
+    - framework: Redis
+
+    /' Behaviors '/
+    + workFlowComplete(id: long): boolean
+    + discordActionComplete(id: long): boolean
+    + pollingCompleted(id: long): boolean
+    + slackActionComplete(id: long): boolean
+    + emailActionComplete(id: long): boolean
+
+}
+
+note left of InMemoryCache
+    Small cache (<20MB) with low TTL (2-3 minutes). Used to prevent duplication.
+end note
+
+
+/' Connections '/
+
+PreemptibleCreator <|.. NewEventWorker
+PreemptibleCreator <|.. EmailWorker
+PreemptibleCreator <|.. DiscordWorker
+PreemptibleCreator <|.. PollingWorker
+PreemptibleCreator <|.. SlackWorker
+PreemptibleCreator <|.. Auth
+PreemptibleCreator <|.. WorkflowController
+
+InMemoryCache <|-- NewEventWorker
+InMemoryCache <|-- EmailWorker
+InMemoryCache <|-- DiscordWorker
+InMemoryCache <|-- PollingWorker
+InMemoryCache <|-- SlackWorker
+
+AuthDB <- Auth
+AuthDB -> Auth
+
+WorkflowDB <- WorkflowController
+WorkflowDB -> WorkflowController
+
+NewEventWorker <|-- RabbitMQ
+EmailWorker <|-- RabbitMQ
+SlackWorker <|-- RabbitMQ
+DiscordWorker <|-- RabbitMQ
+PollingWorker <|-- RabbitMQ
+
+RabbitMQ <|-- WorkflowController
+
+WorkflowController <|-- APIGateway
+Auth <|-- APIGateway
+
+ServiceDiscovery <|-- WorkflowController
+ServiceDiscovery <|-- Auth
+ServiceDiscovery <|-- APIGateway
+
+APIGateway <|-- ReverseProxy
+ReverseProxy <|-- Frontend
+Frontend <|-- User
+
+@enduml
